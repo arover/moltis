@@ -174,6 +174,8 @@ pub struct GatewayState {
     /// One-time setup code displayed at startup, required during initial setup.
     /// Cleared after successful setup.
     pub setup_code: RwLock<Option<String>>,
+    /// Whether the server is bound to a loopback address (localhost/127.0.0.1/::1).
+    pub localhost_only: bool,
 }
 
 impl GatewayState {
@@ -182,7 +184,7 @@ impl GatewayState {
         services: GatewayServices,
         approval_manager: Arc<ApprovalManager>,
     ) -> Arc<Self> {
-        Self::with_options(auth, services, approval_manager, None, None, None)
+        Self::with_options(auth, services, approval_manager, None, None, None, false)
     }
 
     pub fn with_sandbox_router(
@@ -191,7 +193,15 @@ impl GatewayState {
         approval_manager: Arc<ApprovalManager>,
         sandbox_router: Option<Arc<SandboxRouter>>,
     ) -> Arc<Self> {
-        Self::with_options(auth, services, approval_manager, sandbox_router, None, None)
+        Self::with_options(
+            auth,
+            services,
+            approval_manager,
+            sandbox_router,
+            None,
+            None,
+            false,
+        )
     }
 
     pub fn with_options(
@@ -201,6 +211,7 @@ impl GatewayState {
         sandbox_router: Option<Arc<SandboxRouter>>,
         credential_store: Option<Arc<CredentialStore>>,
         webauthn_state: Option<Arc<crate::auth_webauthn::WebAuthnState>>,
+        localhost_only: bool,
     ) -> Arc<Self> {
         let hostname = hostname::get()
             .ok()
@@ -227,6 +238,7 @@ impl GatewayState {
             sandbox_router,
             channel_reply_queue: RwLock::new(HashMap::new()),
             setup_code: RwLock::new(None),
+            localhost_only,
         })
     }
 

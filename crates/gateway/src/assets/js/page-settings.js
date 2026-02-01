@@ -4,6 +4,7 @@ import { signal } from "@preact/signals";
 import { html } from "htm/preact";
 import { render } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
+import { refresh as refreshGon } from "./gon.js";
 import { sendRpc } from "./helpers.js";
 import { navigate, registerPrefix } from "./router.js";
 import * as S from "./state.js";
@@ -202,6 +203,17 @@ function IdentitySection() {
 	var [saved, setSaved] = useState(false);
 	var [error, setError] = useState(null);
 
+	// Sync state when identity loads asynchronously
+	useEffect(() => {
+		if (!id) return;
+		setName(id.name || "");
+		setEmoji(id.emoji || "");
+		setCreature(id.creature || "");
+		setVibe(id.vibe || "");
+		setUserName(id.user_name || "");
+		setSoul(id.soul || "");
+	}, [id]);
+
 	if (loading.value) {
 		return html`<div class="settings-content">
 			<p class="text-sm text-[var(--muted)]">Loading...</p>
@@ -237,7 +249,10 @@ function IdentitySection() {
 			setSaving(false);
 			if (res?.ok) {
 				identity.value = res.payload;
+				refreshGon();
 				setSaved(true);
+				var banner = document.getElementById("onboardingBanner");
+				if (banner) banner.style.display = "none";
 				setTimeout(() => {
 					setSaved(false);
 					rerender();
@@ -351,6 +366,8 @@ function IdentitySection() {
 
 function SecuritySection() {
 	var [authDisabled, setAuthDisabled] = useState(false);
+	var [localhostOnly, setLocalhostOnly] = useState(false);
+	var [hasPassword, setHasPassword] = useState(true);
 	var [authLoading, setAuthLoading] = useState(true);
 
 	var [curPw, setCurPw] = useState("");
@@ -376,7 +393,9 @@ function SecuritySection() {
 		fetch("/api/auth/status")
 			.then((r) => (r.ok ? r.json() : null))
 			.then((d) => {
-				if (d && d.auth_disabled) setAuthDisabled(true);
+				if (d?.auth_disabled) setAuthDisabled(true);
+				if (d?.localhost_only) setLocalhostOnly(true);
+				if (d?.has_password === false) setHasPassword(false);
 				setAuthLoading(false);
 				rerender();
 			})
@@ -415,17 +434,20 @@ function SecuritySection() {
 			return;
 		}
 		setPwSaving(true);
+		var payload = { new_password: newPw };
+		if (hasPassword) payload.current_password = curPw;
 		fetch("/api/auth/password/change", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ current_password: curPw, new_password: newPw }),
+			body: JSON.stringify(payload),
 		})
 			.then((r) => {
 				if (r.ok) {
-					setPwMsg("Password changed.");
+					setPwMsg(hasPassword ? "Password changed." : "Password set.");
 					setCurPw("");
 					setNewPw("");
 					setConfirmPw("");
+					setHasPassword(true);
 				} else return r.text().then((t) => setPwErr(t));
 				setPwSaving(false);
 				rerender();
@@ -607,13 +629,17 @@ function SecuritySection() {
 	}
 
 	if (authDisabled) {
+		var isScary = !localhostOnly;
 		return html`<div class="settings-content">
 			<h2 class="settings-title">Security</h2>
 			<div class="settings-danger-box" style="margin-top:1rem">
 				<strong style="color:var(--error, #e53935)">Authentication is disabled</strong>
 				<p class="settings-hint" style="margin-top:0.5rem">
-					Anyone with network access can control moltis and your computer.
-					Set up a password to protect your instance.
+					${
+						isScary
+							? "Anyone with network access can control moltis and your computer. Set up a password to protect your instance."
+							: "Authentication has been removed. While localhost-only access is safe, you should set up a password before exposing moltis to the network."
+					}
 				</p>
 				<button type="button" class="settings-btn" style="margin-top:0.75rem"
 					onClick=${() => {
@@ -626,29 +652,44 @@ function SecuritySection() {
 	return html`<div class="settings-content">
 		<h2 class="settings-title">Security</h2>
 
+		${
+			localhostOnly && !hasPassword
+				? html`<div class="settings-info-box" style="margin-top:1rem;margin-bottom:1rem;padding:0.75rem 1rem;border-radius:6px;background:var(--surface2);border:1px solid var(--border)">
+			<p class="settings-hint" style="margin:0">
+				Moltis is running on localhost, so you have full access without a password.
+				Set a password before exposing moltis to the network.
+			</p>
+		</div>`
+				: null
+		}
+
 		<div class="settings-section">
-			<h3 class="settings-section-title">Change Password</h3>
+			<h3 class="settings-section-title">${hasPassword ? "Change Password" : "Set Password"}</h3>
 			<form onSubmit=${onChangePw}>
 				<div class="settings-grid">
-					<div class="settings-field">
+					${
+						hasPassword
+							? html`<div class="settings-field">
 						<label class="settings-label">Current password</label>
 						<input type="password" class="settings-input" value=${curPw}
 							onInput=${(e) => setCurPw(e.target.value)} />
-					</div>
+					</div>`
+							: null
+					}
 					<div class="settings-field">
-						<label class="settings-label">New password</label>
+						<label class="settings-label">${hasPassword ? "New password" : "Password"}</label>
 						<input type="password" class="settings-input" value=${newPw}
 							onInput=${(e) => setNewPw(e.target.value)} placeholder="At least 8 characters" />
 					</div>
 					<div class="settings-field">
-						<label class="settings-label">Confirm new password</label>
+						<label class="settings-label">Confirm ${hasPassword ? "new " : ""}password</label>
 						<input type="password" class="settings-input" value=${confirmPw}
 							onInput=${(e) => setConfirmPw(e.target.value)} />
 					</div>
 				</div>
 				<div class="settings-actions">
 					<button type="submit" class="settings-btn" disabled=${pwSaving}>
-						${pwSaving ? "Changing\u2026" : "Change password"}
+						${pwSaving ? (hasPassword ? "Changing\u2026" : "Setting\u2026") : hasPassword ? "Change password" : "Set password"}
 					</button>
 					${pwMsg ? html`<span class="settings-saved">${pwMsg}</span>` : null}
 					${pwErr ? html`<span class="settings-error">${pwErr}</span>` : null}
@@ -681,7 +722,7 @@ function SecuritySection() {
 								</form>`
 								: html`<div>
 									<strong>${pk.name}</strong>
-									<span style="color:var(--muted);font-size:0.78rem"> - ${pk.created_at}</span>
+									<span style="color:var(--muted);font-size:0.78rem"> - <time datetime="${pk.created_at}">${pk.created_at}</time></span>
 								</div>
 								<div style="display:flex;gap:4px">
 									<button class="settings-btn" onClick=${() => onStartRename(pk.id, pk.name)}>Rename</button>
@@ -727,7 +768,7 @@ function SecuritySection() {
 						<div>
 							<strong>${ak.label}</strong>
 							<code style="margin-left:0.5rem;font-size:0.78rem">${ak.key_prefix}...</code>
-							<span style="color:var(--muted);font-size:0.78rem"> - ${ak.created_at}</span>
+							<span style="color:var(--muted);font-size:0.78rem"> - <time datetime="${ak.created_at}">${ak.created_at}</time></span>
 						</div>
 						<button class="settings-btn settings-btn-danger"
 							onClick=${() => onRevokeApiKey(ak.id)}>Revoke</button>

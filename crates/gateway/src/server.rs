@@ -91,6 +91,7 @@ pub fn build_gateway_app(state: Arc<GatewayState>, methods: Arc<MethodRegistry>)
         // Protected API routes — require auth when credential store is configured.
         let protected = Router::new()
             .route("/api/bootstrap", get(api_bootstrap_handler))
+            .route("/api/gon", get(api_gon_handler))
             .route("/api/skills", get(api_skills_handler))
             .route("/api/skills/search", get(api_skills_search_handler))
             .route(
@@ -190,11 +191,7 @@ pub async fn start_gateway(
     }
 
     // Initialize data directory and SQLite database.
-    let data_dir = data_dir.unwrap_or_else(|| {
-        directories::ProjectDirs::from("", "", "moltis")
-            .map(|d| d.data_dir().to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from(".moltis"))
-    });
+    let data_dir = data_dir.unwrap_or_else(moltis_config::data_dir);
     std::fs::create_dir_all(&data_dir).ok();
 
     // Enable log persistence so entries survive restarts.
@@ -264,9 +261,8 @@ pub async fn start_gateway(
     );
 
     // Migrate from projects.toml if it exists.
-    let config_dir = directories::ProjectDirs::from("", "", "moltis")
-        .map(|d| d.config_dir().to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from(".moltis"));
+    let config_dir =
+        moltis_config::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".moltis"));
     let projects_toml_path = config_dir.join("projects.toml");
     if projects_toml_path.exists() {
         info!("migrating projects.toml to SQLite");
@@ -521,6 +517,7 @@ pub async fn start_gateway(
     services = services.with_session_metadata(Arc::clone(&session_metadata));
     services = services.with_session_store(Arc::clone(&session_store));
 
+    let is_localhost = matches!(bind, "127.0.0.1" | "::1" | "localhost");
     let state = GatewayState::with_options(
         resolved_auth,
         services,
@@ -528,6 +525,7 @@ pub async fn start_gateway(
         Some(Arc::clone(&sandbox_router)),
         Some(Arc::clone(&credential_store)),
         webauthn_state,
+        is_localhost,
     );
 
     // Generate a one-time setup code if setup is pending and auth is not disabled.
@@ -681,6 +679,11 @@ pub async fn start_gateway(
             }
         ),
         format!("sandbox: {} backend", sandbox_router.backend_name()),
+        format!(
+            "config: {}",
+            moltis_config::find_or_default_config_path().display()
+        ),
+        format!("data: {}", data_dir.display()),
     ];
     // Hint about Apple Container on macOS when using Docker.
     #[cfg(target_os = "macos")]
@@ -825,8 +828,38 @@ async fn ws_upgrade_handler(
 /// Injects a `<script>` tag with pre-fetched bootstrap data (channels,
 /// sessions, models, projects) so the UI can render synchronously without
 /// waiting for the WebSocket handshake — similar to the gon pattern in Rails.
+/// Server-side data injected into every page as `window.__MOLTIS__`
+/// (gon pattern — see CLAUDE.md § Server-Injected Data).
+///
+/// Add new fields here when the frontend needs data at page load
+/// without an async fetch. Fields must not depend on the request
+/// (no cookies, no session — use `/api/auth/status` for that).
 #[cfg(feature = "web-ui")]
-async fn spa_fallback(uri: axum::http::Uri) -> impl IntoResponse {
+#[derive(serde::Serialize)]
+struct GonData {
+    identity: moltis_config::ResolvedIdentity,
+}
+
+#[cfg(feature = "web-ui")]
+async fn build_gon_data(gw: &GatewayState) -> GonData {
+    let identity = gw
+        .services
+        .onboarding
+        .identity_get()
+        .await
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    GonData { identity }
+}
+
+#[cfg(feature = "web-ui")]
+async fn api_gon_handler(State(state): State<AppState>) -> impl IntoResponse {
+    Json(build_gon_data(&state.gateway).await)
+}
+
+#[cfg(feature = "web-ui")]
+async fn spa_fallback(State(state): State<AppState>, uri: axum::http::Uri) -> impl IntoResponse {
     let path = uri.path();
     if path.starts_with("/assets/") || path.contains('.') {
         return (StatusCode::NOT_FOUND, "not found").into_response();
@@ -835,6 +868,13 @@ async fn spa_fallback(uri: axum::http::Uri) -> impl IntoResponse {
     let raw = read_asset("index.html")
         .and_then(|b| String::from_utf8(b).ok())
         .unwrap_or_default();
+
+    // Build server-side data blob (gon pattern) injected into <head>.
+    let gon = build_gon_data(&state.gateway).await;
+    let gon_script = format!(
+        "<script>window.__MOLTIS__={};</script>",
+        serde_json::to_string(&gon).unwrap_or_else(|_| "{}".into()),
+    );
 
     let body = if is_dev_assets() {
         // Dev: no versioned URLs, just serve directly with no-cache
@@ -846,6 +886,9 @@ async fn spa_fallback(uri: axum::http::Uri) -> impl IntoResponse {
         raw.replace("__BUILD_TS__", &HASH)
             .replace("/assets/", &versioned)
     };
+
+    // Inject gon data into <head> so it's available before any module scripts run.
+    let body = body.replace("</head>", &format!("{gon_script}\n</head>"));
 
     ([("cache-control", "no-cache, no-store")], Html(body)).into_response()
 }

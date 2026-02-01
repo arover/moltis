@@ -20,6 +20,17 @@ async fn start_auth_server() -> (SocketAddr, Arc<CredentialStore>) {
 
 /// Start a test server and also return the GatewayState for setup code tests.
 async fn start_auth_server_with_state() -> (SocketAddr, Arc<CredentialStore>, Arc<GatewayState>) {
+    start_auth_server_impl(false).await
+}
+
+/// Start a localhost-only test server.
+async fn start_localhost_server() -> (SocketAddr, Arc<CredentialStore>, Arc<GatewayState>) {
+    start_auth_server_impl(true).await
+}
+
+async fn start_auth_server_impl(
+    localhost_only: bool,
+) -> (SocketAddr, Arc<CredentialStore>, Arc<GatewayState>) {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     let auth_config = moltis_config::AuthConfig::default();
     let cred_store = Arc::new(
@@ -37,6 +48,7 @@ async fn start_auth_server_with_state() -> (SocketAddr, Arc<CredentialStore>, Ar
         None,
         Some(Arc::clone(&cred_store)),
         None,
+        localhost_only,
     );
     let state_clone = Arc::clone(&state);
     let methods = Arc::new(MethodRegistry::new());
@@ -454,7 +466,76 @@ async fn setup_code_not_required_when_auth_disabled() {
         .unwrap();
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["auth_disabled"], true);
-    // When auth is disabled, setup_code_required is not in the response
-    // (the handler returns early).
-    assert_eq!(body.get("setup_code_required"), None);
+    // After reset, a setup code is generated so setup_code_required is true.
+    assert_eq!(body["setup_code_required"], true);
+}
+
+// ── Localhost tests ──────────────────────────────────────────────────────────
+
+/// On localhost with no password, status returns authenticated: true.
+#[cfg(feature = "web-ui")]
+#[tokio::test]
+async fn localhost_no_password_status_authenticated() {
+    let (addr, _store, _state) = start_localhost_server().await;
+
+    let resp = reqwest::get(format!("http://{addr}/api/auth/status"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["authenticated"], true);
+    assert_eq!(body["setup_required"], false);
+    assert_eq!(body["has_password"], false);
+    assert_eq!(body["localhost_only"], true);
+}
+
+/// On localhost with no password, session-protected endpoints work (AuthSession bypass).
+#[cfg(feature = "web-ui")]
+#[tokio::test]
+async fn localhost_no_password_session_endpoints_accessible() {
+    let (addr, _store, _state) = start_localhost_server().await;
+
+    // /api/auth/api-keys requires AuthSession — should work on localhost without password.
+    let resp = reqwest::get(format!("http://{addr}/api/auth/api-keys"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+/// On localhost with no password, can set a password via /api/auth/password/change.
+#[cfg(feature = "web-ui")]
+#[tokio::test]
+async fn localhost_set_password_without_current() {
+    let (addr, store, _state) = start_localhost_server().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/auth/password/change"))
+        .header("Content-Type", "application/json")
+        .body(r#"{"new_password":"newpass123"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Password should now be set.
+    assert!(store.has_password_set().await.unwrap());
+    assert!(store.verify_password("newpass123").await.unwrap());
+}
+
+/// On localhost with password set, status returns has_password: true.
+#[cfg(feature = "web-ui")]
+#[tokio::test]
+async fn localhost_with_password_requires_login() {
+    let (addr, store, _state) = start_localhost_server().await;
+    store.set_initial_password("testpass123").await.unwrap();
+
+    let resp = reqwest::get(format!("http://{addr}/api/auth/status"))
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["has_password"], true);
+    assert_eq!(body["setup_required"], false);
+    // Not authenticated without a session.
+    assert_eq!(body["authenticated"], false);
 }

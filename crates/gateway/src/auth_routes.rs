@@ -29,6 +29,12 @@ impl axum::extract::FromRef<AuthState> for Arc<CredentialStore> {
     }
 }
 
+impl axum::extract::FromRef<AuthState> for Arc<GatewayState> {
+    fn from_ref(state: &AuthState) -> Self {
+        Arc::clone(&state.gateway_state)
+    }
+}
+
 /// Build the auth router with all `/api/auth/*` routes.
 pub fn auth_router() -> axum::Router<AuthState> {
     axum::Router::new()
@@ -67,34 +73,44 @@ async fn status_handler(
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let auth_disabled = state.credential_store.is_auth_disabled();
-
-    // When auth has been explicitly disabled, tell the frontend no auth is needed.
-    if auth_disabled {
-        return Json(serde_json::json!({
-            "setup_required": false,
-            "has_passkeys": false,
-            "authenticated": true,
-            "auth_disabled": true,
-        }));
-    }
-
-    let setup_required = !state.credential_store.is_setup_complete();
+    let localhost_only = state.gateway_state.localhost_only;
+    let has_password = state
+        .credential_store
+        .has_password_set()
+        .await
+        .unwrap_or(false);
     let has_passkeys = state.credential_store.has_passkeys().await.unwrap_or(false);
 
-    let cookie_header = headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let token =
-        crate::auth_middleware::parse_cookie(cookie_header, crate::auth_middleware::SESSION_COOKIE);
-    let authenticated = match token {
-        Some(t) => state
-            .credential_store
-            .validate_session(t)
-            .await
-            .unwrap_or(false),
-        None => false,
+    // Determine authenticated status:
+    // - auth_disabled → pass-through
+    // - localhost with no password → auto-authenticated
+    // - otherwise → check session cookie
+    let authenticated = if auth_disabled || (localhost_only && !has_password) {
+        true
+    } else {
+        let cookie_header = headers
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let token = crate::auth_middleware::parse_cookie(
+            cookie_header,
+            crate::auth_middleware::SESSION_COOKIE,
+        );
+        match token {
+            Some(t) => state
+                .credential_store
+                .validate_session(t)
+                .await
+                .unwrap_or(false),
+            None => false,
+        }
     };
+
+    // setup_required: only when auth isn't disabled and it's not the
+    // localhost-no-password case.
+    let setup_required = !auth_disabled
+        && !(localhost_only && !has_password)
+        && !state.credential_store.is_setup_complete();
 
     let setup_code_required = state.gateway_state.setup_code.read().await.is_some();
 
@@ -102,8 +118,10 @@ async fn status_handler(
         "setup_required": setup_required,
         "has_passkeys": has_passkeys,
         "authenticated": authenticated,
-        "auth_disabled": false,
+        "auth_disabled": auth_disabled,
         "setup_code_required": setup_code_required,
+        "has_password": has_password,
+        "localhost_only": localhost_only,
     }))
 }
 
@@ -111,7 +129,7 @@ async fn status_handler(
 
 #[derive(serde::Deserialize)]
 struct SetupRequest {
-    password: String,
+    password: Option<String>,
     setup_code: Option<String>,
 }
 
@@ -131,7 +149,24 @@ async fn setup_handler(
         return (StatusCode::FORBIDDEN, "invalid or missing setup code").into_response();
     }
 
-    if body.password.len() < 8 {
+    let password = body.password.unwrap_or_default();
+
+    // On localhost, allow empty password (skip setup without setting one).
+    if password.is_empty() && state.gateway_state.localhost_only {
+        // Clear auth_disabled (e.g. from a previous reset) and setup code.
+        state.credential_store.clear_auth_disabled();
+        *state.gateway_state.setup_code.write().await = None;
+        return match state.credential_store.create_session().await {
+            Ok(token) => session_response(token),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to create session: {e}"),
+            )
+                .into_response(),
+        };
+    }
+
+    if password.len() < 8 {
         return (
             StatusCode::BAD_REQUEST,
             "password must be at least 8 characters",
@@ -139,11 +174,7 @@ async fn setup_handler(
             .into_response();
     }
 
-    if let Err(e) = state
-        .credential_store
-        .set_initial_password(&body.password)
-        .await
-    {
+    if let Err(e) = state.credential_store.set_initial_password(&password).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to set password: {e}"),
@@ -228,7 +259,7 @@ async fn reset_auth_handler(
 
 #[derive(serde::Deserialize)]
 struct ChangePasswordRequest {
-    current_password: String,
+    current_password: Option<String>,
     new_password: String,
 }
 
@@ -245,9 +276,28 @@ async fn change_password_handler(
             .into_response();
     }
 
+    let has_password = state
+        .credential_store
+        .has_password_set()
+        .await
+        .unwrap_or(false);
+
+    if !has_password {
+        // No password set yet — use set_initial_password (no current password needed).
+        return match state
+            .credential_store
+            .set_initial_password(&body.new_password)
+            .await
+        {
+            Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        };
+    }
+
+    let current_password = body.current_password.unwrap_or_default();
     match state
         .credential_store
-        .change_password(&body.current_password, &body.new_password)
+        .change_password(&current_password, &body.new_password)
         .await
     {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),

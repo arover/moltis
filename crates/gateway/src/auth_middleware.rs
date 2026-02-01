@@ -7,7 +7,10 @@ use axum::{
     response::{IntoResponse, Json},
 };
 
-use crate::auth::{AuthIdentity, AuthMethod, CredentialStore};
+use crate::{
+    auth::{AuthIdentity, AuthMethod, CredentialStore},
+    state::GatewayState,
+};
 
 /// Session cookie name.
 pub const SESSION_COOKIE: &str = "moltis_session";
@@ -20,11 +23,20 @@ impl<S> FromRequestParts<S> for AuthSession
 where
     S: Send + Sync,
     Arc<CredentialStore>: FromRef<S>,
+    Arc<GatewayState>: FromRef<S>,
 {
     type Rejection = (StatusCode, &'static str);
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let store = Arc::<CredentialStore>::from_ref(state);
+        let gw = Arc::<GatewayState>::from_ref(state);
+
+        // On localhost with no password, grant access without a session.
+        if gw.localhost_only && !store.has_password_set().await.unwrap_or(true) {
+            return Ok(AuthSession(AuthIdentity {
+                method: AuthMethod::Loopback,
+            }));
+        }
 
         let cookie_header = parts
             .headers

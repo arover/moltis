@@ -1,6 +1,7 @@
 // ── Entry point ────────────────────────────────────────────
 
 import { onEvent } from "./events.js";
+import * as gon from "./gon.js";
 import { renderSessionProjectSelect } from "./project-combo.js";
 import { renderProjectSelect } from "./projects.js";
 import { mount, navigate, registerPage } from "./router.js";
@@ -25,6 +26,7 @@ import { setHasPasskeys } from "./page-login.js";
 
 // Import side-effect modules
 import "./session-search.js";
+import "./time-format.js";
 
 // Redirect root to /chats
 registerPage("/", () => {
@@ -33,6 +35,11 @@ registerPage("/", () => {
 
 initTheme();
 injectMarkdownStyles();
+
+// Apply server-injected identity immediately (no async wait), and
+// keep the header in sync whenever gon.identity is refreshed.
+applyIdentity(gon.get("identity"));
+gon.onChange("identity", applyIdentity);
 onEvent("session", (payload) => {
 	fetchSessions();
 	if (payload && payload.kind === "patched" && payload.sessionKey === S.activeSessionKey) {
@@ -58,7 +65,7 @@ fetch("/api/auth/status")
 			mount("/login");
 			return;
 		}
-		if (auth.auth_disabled) {
+		if (auth.auth_disabled && !auth.localhost_only) {
 			showAuthDisabledBanner();
 		}
 		startApp();
@@ -71,6 +78,18 @@ fetch("/api/auth/status")
 function showAuthDisabledBanner() {
 	var el = document.getElementById("authDisabledBanner");
 	if (el) el.style.display = "";
+}
+
+function showOnboardingBanner() {
+	var el = document.getElementById("onboardingBanner");
+	if (el) el.style.display = "";
+}
+
+function applyIdentity(identity) {
+	var emojiEl = document.getElementById("titleEmoji");
+	var nameEl = document.getElementById("titleName");
+	if (emojiEl) emojiEl.textContent = identity?.emoji ? `${identity.emoji} ` : "";
+	if (nameEl) nameEl.textContent = identity?.name || "moltis";
 }
 
 function applyModels(models) {
@@ -92,9 +111,12 @@ function fetchBootstrap() {
 	fetch("/api/bootstrap")
 		.then((r) => r.json())
 		.then((boot) => {
-			if (boot.onboarded === false && location.pathname !== "/settings") {
-				navigate("/settings");
-				return;
+			if (boot.onboarded === false) {
+				showOnboardingBanner();
+				if (location.pathname === "/" || location.pathname === "/chats") {
+					navigate("/settings");
+					return;
+				}
 			}
 			if (boot.channels) S.setCachedChannels(boot.channels.channels || boot.channels || []);
 			if (boot.sessions) {

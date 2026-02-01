@@ -58,6 +58,14 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
+    /// Open a database at the given path, reset all auth, and close it.
+    pub async fn reset_from_db_path(db_path: &std::path::Path) -> anyhow::Result<()> {
+        let db_url = format!("sqlite:{}", db_path.display());
+        let pool = SqlitePool::connect(&db_url).await?;
+        let store = Self::new(pool).await?;
+        store.reset_all().await
+    }
+
     /// Create a new store and initialize tables.
     /// Reads `auth.disabled` from the discovered config file.
     pub async fn new(pool: SqlitePool) -> anyhow::Result<Self> {
@@ -146,11 +154,20 @@ impl CredentialStore {
         self.auth_disabled.load(Ordering::Relaxed)
     }
 
+    /// Clear the auth-disabled flag (e.g. after completing localhost setup without a password).
+    pub fn clear_auth_disabled(&self) {
+        self.auth_disabled.store(false, Ordering::Relaxed);
+        let _ = self.persist_auth_disabled(false);
+    }
+
     fn persist_auth_disabled(&self, disabled: bool) -> anyhow::Result<()> {
-        let mut config = moltis_config::discover_and_load();
-        config.auth.disabled = disabled;
-        moltis_config::save_config(&config)?;
+        moltis_config::update_config(|c| c.auth.disabled = disabled)?;
         Ok(())
+    }
+
+    /// Whether a password has been set (public, for status endpoint).
+    pub async fn has_password_set(&self) -> anyhow::Result<bool> {
+        self.has_password().await
     }
 
     async fn has_password(&self) -> anyhow::Result<bool> {
@@ -269,7 +286,7 @@ impl CredentialStore {
     /// List all API keys (active and revoked).
     pub async fn list_api_keys(&self) -> anyhow::Result<Vec<ApiKeyEntry>> {
         let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
-            "SELECT id, label, key_prefix, created_at FROM api_keys WHERE revoked_at IS NULL ORDER BY created_at DESC",
+            "SELECT id, label, key_prefix, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) FROM api_keys WHERE revoked_at IS NULL ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -353,7 +370,7 @@ impl CredentialStore {
     /// List all registered passkeys.
     pub async fn list_passkeys(&self) -> anyhow::Result<Vec<PasskeyEntry>> {
         let rows: Vec<(i64, String, String)> =
-            sqlx::query_as("SELECT id, name, created_at FROM passkeys ORDER BY created_at DESC")
+            sqlx::query_as("SELECT id, name, strftime('%Y-%m-%dT%H:%M:%SZ', created_at) FROM passkeys ORDER BY created_at DESC")
                 .fetch_all(&self.pool)
                 .await?;
         Ok(rows

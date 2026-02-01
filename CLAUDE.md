@@ -51,6 +51,50 @@ toggle their visibility. This keeps markup in HTML where it belongs and makes
 the structure easier to inspect. Preact components (HTM templates) are the
 exception — they use `html` tagged templates by design.
 
+### Server-Injected Data (gon pattern)
+
+When the frontend needs server-side data **at page load** (before any async
+fetch completes), use the gon pattern instead of inline `<script>` DOM
+manipulation or extra API calls:
+
+**Rust side** — add a field to `GonData` in `server.rs` and populate it in
+`build_gon_data()`. The struct is serialized and injected into `<head>` as
+`<script>window.__MOLTIS__={...};</script>` on every page serve. Only put
+request-independent data here (no cookies, no sessions — those still need
+`/api/auth/status`).
+
+```rust
+// server.rs
+#[derive(serde::Serialize)]
+struct GonData {
+    identity: GonIdentity,
+    // add new fields here
+}
+```
+
+**JS side** — import `gon.js`:
+
+```js
+import * as gon from "./gon.js";
+
+// Read server-injected data synchronously at module load.
+var identity = gon.get("identity");
+
+// React to changes (from set() or refresh()).
+gon.onChange("identity", (id) => { /* update DOM */ });
+
+// After a mutation (e.g. saving identity), refresh all gon data
+// from the server. This re-fetches /api/gon and notifies all
+// onChange listeners — no need to update specific fields manually.
+gon.refresh();
+```
+
+**Do NOT**: inject inline `<script>` tags with `document.getElementById`
+calls, build HTML strings in Rust, or use `body.replace` for DOM side effects.
+All of those are fragile. The gon blob is the single injection point.
+When data changes at runtime, call `gon.refresh()` instead of manually
+updating individual fields — it keeps everything consistent.
+
 ## Testing
 
 ```bash

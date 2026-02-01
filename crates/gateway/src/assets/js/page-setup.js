@@ -10,6 +10,7 @@ function SetupPage() {
 	var [confirm, setConfirm] = useState("");
 	var [setupCode, setSetupCode] = useState("");
 	var [codeRequired, setCodeRequired] = useState(false);
+	var [localhostOnly, setLocalhostOnly] = useState(false);
 	var [error, setError] = useState(null);
 	var [saving, setSaving] = useState(false);
 
@@ -18,6 +19,7 @@ function SetupPage() {
 			.then((r) => r.json())
 			.then((data) => {
 				if (data.setup_code_required) setCodeRequired(true);
+				if (data.localhost_only) setLocalhostOnly(true);
 			})
 			.catch(() => {});
 	}, []);
@@ -25,20 +27,23 @@ function SetupPage() {
 	function onSubmit(e) {
 		e.preventDefault();
 		setError(null);
+		// On localhost, password is optional
+		if (password.length > 0 || !localhostOnly) {
+			if (password.length < 8) {
+				setError("Password must be at least 8 characters.");
+				return;
+			}
+			if (password !== confirm) {
+				setError("Passwords do not match.");
+				return;
+			}
+		}
 		if (codeRequired && setupCode.trim().length === 0) {
 			setError("Enter the setup code shown in the terminal.");
 			return;
 		}
-		if (password.length < 8) {
-			setError("Password must be at least 8 characters.");
-			return;
-		}
-		if (password !== confirm) {
-			setError("Passwords do not match.");
-			return;
-		}
 		setSaving(true);
-		var body = { password };
+		var body = password ? { password } : {};
 		if (codeRequired) body.setup_code = setupCode.trim();
 		fetch("/api/auth/setup", {
 			method: "POST",
@@ -64,34 +69,17 @@ function SetupPage() {
 	return html`<div class="auth-page">
 		<div class="auth-card">
 			<h1 class="auth-title">Welcome to moltis</h1>
-			<p class="auth-subtitle">Set a password to secure your instance.</p>
+			<p class="auth-subtitle">${localhostOnly ? "Set a password to secure your instance, or skip for now." : "Set a password to secure your instance."}</p>
 			<form onSubmit=${onSubmit}>
-				${
-					codeRequired
-						? html`<div class="auth-field">
-							<label class="settings-label">Setup code</label>
-							<input
-								type="text"
-								class="settings-input"
-								inputmode="numeric"
-								pattern="[0-9]*"
-								value=${setupCode}
-								onInput=${(e) => setSetupCode(e.target.value)}
-								placeholder="6-digit code from terminal"
-								autofocus
-							/>
-						</div>`
-						: null
-				}
 				<div class="auth-field">
-					<label class="settings-label">Password</label>
+					<label class="settings-label">Password${localhostOnly ? "" : " *"}</label>
 					<input
 						type="password"
 						class="settings-input"
 						value=${password}
 						onInput=${(e) => setPassword(e.target.value)}
-						placeholder="At least 8 characters"
-						autofocus=${!codeRequired}
+						placeholder=${localhostOnly ? "Optional on localhost" : "At least 8 characters"}
+						autofocus
 					/>
 				</div>
 				<div class="auth-field">
@@ -104,9 +92,26 @@ function SetupPage() {
 						placeholder="Repeat password"
 					/>
 				</div>
+				${
+					codeRequired
+						? html`<div class="auth-field">
+							<label class="settings-label">Setup code</label>
+							<input
+								type="text"
+								class="settings-input"
+								inputmode="numeric"
+								pattern="[0-9]*"
+								value=${setupCode}
+								onInput=${(e) => setSetupCode(e.target.value)}
+								placeholder="6-digit code from terminal"
+							/>
+						</div>`
+						: null
+				}
 				${error ? html`<p class="auth-error">${error}</p>` : null}
+				${localhostOnly ? html`<p class="settings-hint" style="margin-top:0.25rem;font-size:0.8rem">You can set a password later in Settings.</p>` : null}
 				<button type="submit" class="settings-btn auth-submit" disabled=${saving}>
-					${saving ? "Setting up\u2026" : "Set password"}
+					${saving ? "Setting up\u2026" : localhostOnly && !password ? "Skip" : "Set password"}
 				</button>
 			</form>
 		</div>

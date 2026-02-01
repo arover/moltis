@@ -211,20 +211,13 @@ impl LiveOnboardingService {
     }
 
     /// Read identity from the config file (for `agent.identity.get`).
-    pub fn identity_get(&self) -> Value {
+    pub fn identity_get(&self) -> moltis_config::ResolvedIdentity {
         if self.config_path.exists()
             && let Ok(cfg) = moltis_config::loader::load_config(&self.config_path)
         {
-            return json!({
-                "name": cfg.identity.name.as_deref().unwrap_or("moltis"),
-                "emoji": cfg.identity.emoji,
-                "creature": cfg.identity.creature,
-                "vibe": cfg.identity.vibe,
-                "soul": cfg.identity.soul,
-                "user_name": cfg.user.name,
-            });
+            return moltis_config::ResolvedIdentity::from_config(&cfg);
         }
-        json!({ "name": "moltis", "avatar": null })
+        moltis_config::ResolvedIdentity::default()
     }
 }
 
@@ -337,9 +330,9 @@ mod tests {
 
         // Verify identity_get reflects updates
         let id = svc.identity_get();
-        assert_eq!(id["name"], "Rex");
-        assert_eq!(id["vibe"], "playful");
-        assert_eq!(id["user_name"], "Alice");
+        assert_eq!(id.name, "Rex");
+        assert_eq!(id.vibe.as_deref(), Some("playful"));
+        assert_eq!(id.user_name.as_deref(), Some("Alice"));
 
         // Update soul
         let res = svc

@@ -93,10 +93,9 @@ fn find_config_file() -> Option<PathBuf> {
     }
 
     // User-global: ~/.config/moltis/
-    if let Some(dirs) = directories::ProjectDirs::from("", "", "moltis") {
-        let config_dir = dirs.config_dir();
+    if let Some(dir) = home_dir().map(|h| h.join(".config").join("moltis")) {
         for name in CONFIG_FILENAMES {
-            let p = config_dir.join(name);
+            let p = dir.join(name);
             if p.exists() {
                 return Some(p);
             }
@@ -106,12 +105,23 @@ fn find_config_file() -> Option<PathBuf> {
     None
 }
 
-/// Returns the config directory (override or user-global `~/.config/moltis/`).
+/// Returns the config directory: override, or `~/.config/moltis/` on all platforms.
 pub fn config_dir() -> Option<PathBuf> {
     if let Some(dir) = config_dir_override() {
         return Some(dir);
     }
-    directories::ProjectDirs::from("", "", "moltis").map(|d| d.config_dir().to_path_buf())
+    home_dir().map(|h| h.join(".config").join("moltis"))
+}
+
+/// Returns the data directory: `~/.moltis/` on all platforms.
+pub fn data_dir() -> PathBuf {
+    home_dir()
+        .map(|h| h.join(".moltis"))
+        .unwrap_or_else(|| PathBuf::from(".moltis"))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
 }
 
 /// Returns the path of an existing config file, or the default TOML path.
@@ -124,10 +134,31 @@ pub fn find_or_default_config_path() -> PathBuf {
         .join("moltis.toml")
 }
 
+/// Lock guarding config read-modify-write cycles.
+static CONFIG_SAVE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Atomically load the current config, apply `f`, and save.
+///
+/// Acquires a process-wide lock so concurrent callers cannot race.
+/// Returns the path written to.
+pub fn update_config(f: impl FnOnce(&mut MoltisConfig)) -> anyhow::Result<PathBuf> {
+    let _guard = CONFIG_SAVE_LOCK.lock().unwrap();
+    let mut config = discover_and_load();
+    f(&mut config);
+    save_config_inner(&config)
+}
+
 /// Serialize `config` to TOML and write it to the user-global config path.
 ///
 /// Creates parent directories if needed. Returns the path written to.
+///
+/// Prefer [`update_config`] for read-modify-write cycles to avoid races.
 pub fn save_config(config: &MoltisConfig) -> anyhow::Result<PathBuf> {
+    let _guard = CONFIG_SAVE_LOCK.lock().unwrap();
+    save_config_inner(config)
+}
+
+fn save_config_inner(config: &MoltisConfig) -> anyhow::Result<PathBuf> {
     let path = find_or_default_config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
