@@ -1,6 +1,6 @@
 // ── Channels page (Preact + HTM + Signals) ──────────────────
 
-import { signal } from "@preact/signals";
+import { signal, useSignal } from "@preact/signals";
 import { html } from "htm/preact";
 import { render } from "preact";
 import { useEffect } from "preact/hooks";
@@ -10,7 +10,7 @@ import { updateNavCount } from "./nav-counts.js";
 import { registerPage } from "./router.js";
 import { connected, models as modelsSig } from "./signals.js";
 import * as S from "./state.js";
-import { ConfirmDialog, Modal, requestConfirm } from "./ui.js";
+import { ConfirmDialog, Modal, ModelSelect, requestConfirm } from "./ui.js";
 
 var channels = signal([]);
 
@@ -190,8 +190,9 @@ function SendersTab() {
 
 // ── Add channel modal ────────────────────────────────────────
 function AddChannelModal() {
-	var error = signal("");
-	var saving = signal(false);
+	var error = useSignal("");
+	var saving = useSignal(false);
+	var addModel = useSignal("");
 
 	function onSubmit(e) {
 		e.preventDefault();
@@ -220,8 +221,11 @@ function AddChannelModal() {
 			mention_mode: form.querySelector("[data-field=mentionMode]").value,
 			allowlist: allowlist,
 		};
-		var model = form.querySelector("[data-field=model]").value;
-		if (model) addConfig.model = model;
+		if (addModel.value) {
+			addConfig.model = addModel.value;
+			var found = modelsSig.value.find((x) => x.id === addModel.value);
+			if (found?.provider) addConfig.model_provider = found.provider;
+		}
 		sendRpc("channels.add", {
 			type: "telegram",
 			account_id: accountId,
@@ -230,12 +234,18 @@ function AddChannelModal() {
 			saving.value = false;
 			if (res?.ok) {
 				showAddModal.value = false;
+				addModel.value = "";
 				loadChannels();
 			} else {
 				error.value = (res?.error && (res.error.message || res.error.detail)) || "Failed to connect bot.";
 			}
 		});
 	}
+
+	var defaultPlaceholder =
+		modelsSig.value.length > 0
+			? `(default: ${modelsSig.value[0].displayName || modelsSig.value[0].id})`
+			: "(server default)";
 
 	var selectStyle =
 		"font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;cursor:pointer;";
@@ -270,10 +280,11 @@ function AddChannelModal() {
         <option value="none">Don't respond in groups</option>
       </select>
       <label class="text-xs text-[var(--muted)]">Default Model</label>
-      <select data-field="model" style=${selectStyle}>
-        <option value="">(server default)</option>
-        ${modelsSig.value.map((m) => html`<option key=${m.id} value=${m.id}>${m.displayName || m.id}</option>`)}
-      </select>
+      <${ModelSelect} models=${modelsSig.value} value=${addModel.value}
+        onChange=${(v) => {
+					addModel.value = v;
+				}}
+        placeholder=${defaultPlaceholder} />
       <label class="text-xs text-[var(--muted)]">DM Allowlist (one username per line)</label>
       <textarea data-field="allowlist" placeholder="user1\nuser2" rows="3"
         style="font-family:var(--font-body);resize:vertical;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;" />
@@ -289,10 +300,14 @@ function AddChannelModal() {
 // ── Edit channel modal ───────────────────────────────────────
 function EditChannelModal() {
 	var ch = editingChannel.value;
+	var error = useSignal("");
+	var saving = useSignal(false);
+	var editModel = useSignal("");
+	useEffect(() => {
+		editModel.value = ch?.config?.model || "";
+	}, [ch]);
 	if (!ch) return null;
 	var cfg = ch.config || {};
-	var error = signal("");
-	var saving = signal(false);
 
 	function onSave(e) {
 		e.preventDefault();
@@ -311,8 +326,11 @@ function EditChannelModal() {
 			mention_mode: form.querySelector("[data-field=mentionMode]").value,
 			allowlist: allowlist,
 		};
-		var model = form.querySelector("[data-field=model]").value;
-		if (model) updateConfig.model = model;
+		if (editModel.value) {
+			updateConfig.model = editModel.value;
+			var found = modelsSig.value.find((x) => x.id === editModel.value);
+			if (found?.provider) updateConfig.model_provider = found.provider;
+		}
 		sendRpc("channels.update", {
 			account_id: ch.account_id,
 			config: updateConfig,
@@ -326,6 +344,11 @@ function EditChannelModal() {
 			}
 		});
 	}
+
+	var defaultPlaceholder =
+		modelsSig.value.length > 0
+			? `(default: ${modelsSig.value[0].displayName || modelsSig.value[0].id})`
+			: "(server default)";
 
 	var selectStyle =
 		"font-family:var(--font-body);background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;cursor:pointer;";
@@ -348,12 +371,11 @@ function EditChannelModal() {
         <option value="none">Don't respond in groups</option>
       </select>
       <label class="text-xs text-[var(--muted)]">Default Model</label>
-      <select data-field="model" style=${selectStyle} value=${cfg.model || ""}>
-        <option value="">(server default)</option>
-        ${modelsSig.value.map((m) => {
-					return html`<option key=${m.id} value=${m.id}>${m.displayName || m.id}</option>`;
-				})}
-      </select>
+      <${ModelSelect} models=${modelsSig.value} value=${editModel.value}
+        onChange=${(v) => {
+					editModel.value = v;
+				}}
+        placeholder=${defaultPlaceholder} />
       <label class="text-xs text-[var(--muted)]">DM Allowlist (one username per line)</label>
       <textarea data-field="allowlist" rows="3"
         style="font-family:var(--font-body);resize:vertical;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:.85rem;">${(cfg.allowlist || []).join("\n")}</textarea>
