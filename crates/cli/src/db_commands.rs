@@ -243,4 +243,83 @@ mod tests {
         let _ = super::DbAction::Clear;
         let _ = super::DbAction::Migrate;
     }
+
+    /// Test that migrations run successfully against a fresh database in a temp directory.
+    /// This verifies the full migration flow works end-to-end.
+    #[tokio::test]
+    async fn test_migrations_run_successfully_in_temp_dir() {
+        let temp = TempDir::new().unwrap();
+        let main_db = temp.path().join("moltis.db");
+        let memory_db = temp.path().join("memory.db");
+
+        // Run main database migrations
+        let db_url = format!("sqlite:{}?mode=rwc", main_db.display());
+        let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
+
+        // Run migrations in dependency order
+        moltis_projects::run_migrations(&pool).await.unwrap();
+        moltis_sessions::run_migrations(&pool).await.unwrap();
+        moltis_cron::run_migrations(&pool).await.unwrap();
+
+        // Verify tables were created by querying them
+        let _: (i64,) = sqlx::query_as("SELECT count(*) FROM projects")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let _: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let _: (i64,) = sqlx::query_as("SELECT count(*) FROM cron_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        pool.close().await;
+
+        // Run memory database migrations
+        let memory_url = format!("sqlite:{}?mode=rwc", memory_db.display());
+        let memory_pool = sqlx::SqlitePool::connect(&memory_url).await.unwrap();
+
+        moltis_memory::schema::run_migrations(&memory_pool)
+            .await
+            .unwrap();
+
+        // Verify memory tables were created
+        let _: (i64,) = sqlx::query_as("SELECT count(*) FROM files")
+            .fetch_one(&memory_pool)
+            .await
+            .unwrap();
+        let _: (i64,) = sqlx::query_as("SELECT count(*) FROM chunks")
+            .fetch_one(&memory_pool)
+            .await
+            .unwrap();
+
+        memory_pool.close().await;
+
+        // Verify database files exist
+        assert!(main_db.exists(), "main database should be created");
+        assert!(memory_db.exists(), "memory database should be created");
+    }
+
+    /// Test that migrations can run multiple times without error (idempotent).
+    /// This verifies set_ignore_missing works correctly.
+    #[tokio::test]
+    async fn test_migrations_are_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let main_db = temp.path().join("moltis.db");
+
+        let db_url = format!("sqlite:{}?mode=rwc", main_db.display());
+        let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
+
+        // Run migrations twice - should not error
+        moltis_projects::run_migrations(&pool).await.unwrap();
+        moltis_sessions::run_migrations(&pool).await.unwrap();
+
+        // Run again - should still work due to set_ignore_missing
+        moltis_projects::run_migrations(&pool).await.unwrap();
+        moltis_sessions::run_migrations(&pool).await.unwrap();
+
+        pool.close().await;
+    }
 }

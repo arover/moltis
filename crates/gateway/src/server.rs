@@ -338,6 +338,7 @@ pub async fn start_gateway(
         .expect("failed to run cron migrations");
     // Gateway's own tables (auth, message_log, channels).
     sqlx::migrate!("./migrations")
+        .set_ignore_missing(true)
         .run(&db_pool)
         .await
         .expect("failed to run gateway migrations");
